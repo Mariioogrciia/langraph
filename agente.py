@@ -4,6 +4,9 @@ from typing import TypedDict, Optional
 from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 
 # =====================================================================
 # 0. CONFIGURACIÓN INICIAL Y BASE DE DATOS DE PRUEBA (SQLite)
@@ -30,9 +33,7 @@ cursor.executemany(
 )
 conn.commit()
 
-# Configura tus variables de entorno para Azure OpenAI:
-os.environ["AZURE_OPENAI_API_KEY"] = os.getenv("AZURE_OPENAI_API_KEY", "tu_clave_aqui")
-os.environ["AZURE_OPENAI_ENDPOINT"] = os.getenv("AZURE_OPENAI_ENDPOINT", "https://foundryasistente.openai.azure.com/")
+# Las variables de entorno para Azure OpenAI se leen automáticamente del .env
 
 model = AzureChatOpenAI(
     azure_deployment="gpt-4o-mini",
