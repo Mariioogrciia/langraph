@@ -1,12 +1,16 @@
 import os
 import sqlite3
+import uuid
 from typing import TypedDict, Optional
 from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path, override=True)
 
 # =====================================================================
 # 0. CONFIGURACIÓN INICIAL Y BASE DE DATOS DE PRUEBA (SQLite)
@@ -33,11 +37,12 @@ cursor.executemany(
 )
 conn.commit()
 
-# Las variables de entorno para Azure OpenAI se leen automáticamente del .env
+print("DEBUG ENDPOINT:", os.getenv("AZURE_OPENAI_ENDPOINT"))
 
 model = AzureChatOpenAI(
+    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
     azure_deployment="gpt-4o-mini",
-    api_version="2024-02-15-preview",
+    api_version="2025-01-01-preview",
     temperature=0
 )
 
@@ -140,15 +145,16 @@ workflow.add_edge("rechazo", "generar_respuesta")
 
 workflow.add_edge("generar_respuesta", END)
 
-# Compilamos el grafo
-app = workflow.compile()
+# Compilamos el grafo con un checkpointer en memoria y configuramos la interrupción antes de ejecutar en base de datos
+memory = MemorySaver()
+app = workflow.compile(checkpointer=memory, interrupt_before=["ejecutar_db"])
 
 # =====================================================================
 # 5. MODO INTERACTIVO (Chat)
 # =====================================================================
 if __name__ == "__main__":
-    print("👋 ¡Hola! Soy tu Agente basado en un Grafo Personalizado (LangGraph).")
-    print("Flujo: Generar Query -> Validar -> Ejecutar DB o Rechazar -> Responder.")
+    print("👋 ¡Hola! Soy tu Agente basado en un Grafo Personalizado (LangGraph) con Human-in-the-Loop.")
+    print("Flujo: Generar Query -> Validar -> HITL -> Ejecutar DB o Rechazar -> Responder.")
     print("Escribe 'salir' para terminar la conversación.")
     print("=" * 60)
 
@@ -160,15 +166,64 @@ if __name__ == "__main__":
             break
             
         if pregunta.strip():
-            # Ejecutamos el grafo con el estado inicial
+            # Generamos un thread_id único para esta pregunta
+            thread_id = str(uuid.uuid4())
+            config = {"configurable": {"thread_id": thread_id}}
             initial_state = {"pregunta_usuario": pregunta}
             
             print("-" * 40)
             try:
-                # invoke ejecutará todo el grafo hasta el nodo END
-                resultado = app.invoke(initial_state)
+                # Se inicia la ejecución del grafo hasta que termine o se interrumpa
+                resultado = app.invoke(initial_state, config=config)
+                
+                # Bucle para manejar interrupciones (HITL)
+                while True:
+                    state_info = app.get_state(config)
+                    
+                    # Si no hay más nodos pendientes de ejecución, hemos terminado
+                    if not state_info.next:
+                        break
+                        
+                    # Si la interrupción ocurre antes de ejecutar la consulta en la base de datos
+                    if "ejecutar_db" in state_info.next:
+                        sql_query = state_info.values.get("sql_query")
+                        print(f"\n🔍 [HITL] El agente ha generado la siguiente consulta SQL:")
+                        print(f"   👉 {sql_query}")
+                        print("\n¿Qué deseas hacer?")
+                        print("1. Aprobar y ejecutar (Pulsa Enter o escribe 's')")
+                        print("2. Modificar la consulta (Escribe la nueva consulta SQL)")
+                        print("3. Rechazar consulta (Escribe 'n' o 'rechazar')")
+                        
+                        opcion = input("\n✍️ HITL > ").strip()
+                        
+                        if opcion.lower() in ["n", "rechazar", "no", "cancelar"]:
+                            print("⚠️ Consulta rechazada por el usuario. Cancelando ejecución...")
+                            # Simulamos el resultado de la base de datos indicando la cancelación
+                            app.update_state(
+                                config,
+                                {"db_result": "Consulta cancelada por el usuario."},
+                                as_node="ejecutar_db"
+                            )
+                            resultado = app.invoke(None, config=config)
+                        elif opcion == "" or opcion.lower() in ["s", "si", "sí", "y", "yes", "aprobar"]:
+                            print("✅ Consulta aprobada. Ejecutando...")
+                            resultado = app.invoke(None, config=config)
+                        else:
+                            # Se asume que el usuario introdujo una consulta SQL editada
+                            print(f"✏️ Modificando la consulta a: {opcion}")
+                            app.update_state(
+                                config,
+                                {"sql_query": opcion},
+                                as_node="generar_query"
+                            )
+                            print("🚀 Ejecutando consulta modificada...")
+                            resultado = app.invoke(None, config=config)
+                    else:
+                        # Si hay otra interrupción imprevista, simplemente reanudamos
+                        resultado = app.invoke(None, config=config)
+                
                 print("-" * 40)
-                print(f"\n🤖 Agente Final:\n{resultado['respuesta_final']}")
+                print(f"\n🤖 Agente Final:\n{resultado.get('respuesta_final')}")
                 print("=" * 60)
             except Exception as e:
                 print(f"\n🛡️ [Error en el grafo] {str(e)}")
