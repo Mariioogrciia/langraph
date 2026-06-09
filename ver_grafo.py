@@ -3,7 +3,7 @@ from agente import app
 # Generar la imagen del grafo usando la API de Mermaid
 try:
     print("Generando imagen del grafo de LangGraph...")
-    imagen = app.get_graph().draw_mermaid_png()
+    imagen = app.get_graph(xray=True).draw_mermaid_png()
     
     with open("grafo.png", "wb") as f:
         f.write(imagen)
